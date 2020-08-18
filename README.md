@@ -9,6 +9,15 @@ To launch the springbok project you need to have:
 - PyGtk
 - [matplotlib](http://matplotlib.org/1.3.1/users/installing.html)
 - LaTeX (for the documentation)
+- reportlab
+- graphviz
+
+## Installation
+
+```
+apt-get install python-gtk2 python-networkx python-matplotlib python-reportlab python-netaddr
+pip install graphviz
+```
 
 ## Launch springbok project
 

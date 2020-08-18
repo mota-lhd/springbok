@@ -16,6 +16,7 @@ class Interface:
     name : string. The name of the interface (ex: inside)
     sub_interfaces : Interface list. A list of sub-interface of this interface
     """
+
     def __init__(self, nameif, network=None, name=None, sub_interfaces=[]):
         """Initialize the Interface with empty values"""
         self.nameif = nameif
@@ -65,7 +66,8 @@ class Interface:
         res : string
         """
         res = ""
-        res += self.nameif
+        if self.nameif is not None:
+            res += self.nameif
         if self.name:
             res += " - "
             res += self.name
@@ -91,4 +93,4 @@ class Interface:
         split = re.split('[a-zA-Z]+', self.nameif)
         if len(split) >= 2:
             res = self.nameif[0] + split[1]
-        return res
+        return self.nameif

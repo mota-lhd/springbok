@@ -86,6 +86,12 @@ def launch_test():
     # list all files
     for file in os.listdir(folder):
         # test if directory
+        if file == 'iptables_parse' \
+                or file == "checkpoint_parse" \
+                or file == "pygtkLearning" \
+                or file == "gtk" \
+                or file == "juniper_parse":
+            continue
         if os.path.isdir(file) and not file.startswith('.'):
             # get folder path
             sub_folder = os.path.join(folder, file)

@@ -22,6 +22,13 @@ from SpringBase import Port
 from SpringBase import Interface
 from AnomalyDetection.InternalDetection import InternalDetection
 from NetworkGraph import NetworkGraph
+from Parser.Routing.RoutingParser import RoutingParser
+
+######## Modification of the class by Maurice TCHAMGOUE N. on 30-06-2015
+###          * Adding the method on_remove_all_menu : this method is called
+###            when the user make a right click on 'remove all'. It will clear
+###            the topology by removing all firewalls
+
 
 
 class Gtk_NewtworkPopupMenu:
@@ -102,6 +109,30 @@ class Gtk_NewtworkPopupMenu:
             self.remove_menu = gtk.MenuItem("Remove")
             self.menu.append(self.remove_menu)
             self.remove_menu.connect("activate", self.on_remove_menu)
+
+        # Show Nat rules #
+        if isinstance(self.node.object, Firewall.Firewall):
+            self.show_nat_rule = gtk.MenuItem("Show nat rules")
+            self.menu.append(self.show_nat_rule)
+            self.show_nat_rule.connect("activate", self.on_show_nat_rule)
+
+        # Show IPSec Tunnels #
+        if isinstance(self.node.object, Firewall.Firewall):
+            self.show_ipsec_tunnels = gtk.MenuItem("Show IPSec tunnels")
+            self.menu.append(self.show_ipsec_tunnels)
+            self.show_ipsec_tunnels.connect("activate", self.on_show_ipsec_tunnels)
+
+        # Add route config file #
+        if isinstance(self.node.object, Firewall.Firewall):
+            self.add_route_config = gtk.MenuItem("add route config")
+            self.menu.append(self.add_route_config)
+            self.add_route_config.connect("activate", self.on_add_route_config)
+
+        # Add interface config file #
+        if isinstance(self.node.object, Firewall.Firewall):
+            self.add_interface_config = gtk.MenuItem("add interface config")
+            self.menu.append(self.add_interface_config)
+            self.add_interface_config.connect("activate", self.on_add_interface_config)
 
         # Itinerary #
         if isinstance(self.node.object, Ip.Ip):
@@ -192,6 +223,7 @@ class Gtk_NewtworkPopupMenu:
                 v['object'].clear_marker()
 
             Gtk_Main.Gtk_Main().lateral_pane.path.clear()
+            Gtk_Main.Gtk_Main().lateral_pane.path_route.clear()
 
         def on_background_image(widget):
             dialog = gtk.FileChooserDialog("Import firewall configuration",
@@ -211,6 +243,24 @@ class Gtk_NewtworkPopupMenu:
             dialog.destroy()
             return True
 
+        def on_remove_all_menu(widget):
+            """Remove a firewall. Close all pages, clear paths and details, remove firewall and redraw the graph"""
+            for row in Gtk_Main.Gtk_Main().lateral_pane.firewalls.model:
+                if 1 == 1:
+                    Gtk_Main.Gtk_Main().lateral_pane.firewalls.model.remove(row.iter)
+                    # break
+            for node in NetworkGraph.NetworkGraph().graph.nodes(data=True):
+                self.node = node[1]['object']
+                if isinstance(self.node.object, Firewall.Firewall):
+                    self.on_remove_menu(node)
+                    self.node = None
+            # g.remove_nodes_from(nodes)
+            Gtk_Main.Gtk_Main().lateral_pane.details.clear()
+            Gtk_Main.Gtk_Main().lateral_pane.path.clear()
+            Gtk_Main.Gtk_Main().notebook.close_all_closable()
+
+            Gtk_Main.Gtk_Main().draw()
+
         map(self.menu.remove, self.menu.get_children())
 
         # Clear #
@@ -222,6 +272,11 @@ class Gtk_NewtworkPopupMenu:
         self.background = gtk.MenuItem("Background image")
         self.menu.append(self.background)
         self.background.connect("activate", on_background_image)
+
+        # Remove all firewalls
+        self.remove_all = gtk.MenuItem('Remove all')
+        self.menu.append(self.remove_all)
+        self.remove_all.connect("activate", on_remove_all_menu)
 
         self.menu.popup(None, None, None, event.button, event.time)
         self.menu.show_all()
@@ -498,6 +553,7 @@ class Gtk_NewtworkPopupMenu:
         NetworkGraph.NetworkGraph().remove_firewall(self.node)
         Gtk_Main.Gtk_Main().draw()
 
+
     def on_itinerary(self, item, itinerary):
         """Add a marker on the node and if both marker are present, show query path menu
 
@@ -535,3 +591,76 @@ class Gtk_NewtworkPopupMenu:
     def on_acl(self, item, acl):
         """Show acl list"""
         Gtk_Main.Gtk_Main().notebook.add_interface_tab(acl)
+
+    def on_show_nat_rule(self, widget):
+        Gtk_Main.Gtk_Main().notebook.add_nat_rule_tab(self.node.object, self.node.object.nat_rule_list)
+
+    def on_show_ipsec_tunnels(self, widget):
+        Gtk_Main.Gtk_Main().notebook.add_ipsec_tunnels(self.node.object, self.node.object.ipsec_maps)
+        print ('maps ipsec')
+
+    def on_add_route_config(self, widget):
+        # self.node.object => instance firewall
+        Gtk_Main.Gtk_Main().statusbar.change_message("Importing Routing configuration ...")
+        filename = self.open_filechooser("Import the routing configuration file")
+        if not filename:
+            Gtk_Main.Gtk_Main().statusbar.change_message("Ready")
+            return
+
+        if self.node.object.type == "Fortinet FortiGate" or self.node.object.type == "Iptables":
+            parser = RoutingParser(self.node.object, filename)
+            parser.parse()
+            new_routes = parser.get_routes()
+            for new_route in new_routes:
+                self.node.object.route_list.append(new_route)
+
+
+        Gtk_Main.Gtk_Main().statusbar.change_message("Ready")
+
+    def on_add_interface_config(self, widget):
+        Gtk_Main.Gtk_Main().statusbar.change_message("Importing Interface configuration ...")
+        filename = self.open_filechooser("Import the Interface configuration file")
+        if not filename:
+            Gtk_Main.Gtk_Main().statusbar.change_message("Ready")
+            return
+
+        if self.node.object.type == "Iptables":
+            parser = RoutingParser(self.node.object, filename)
+            parser.parse_interface()
+            new_interfaces = parser.get_interface()
+            for new_interface in new_interfaces:
+                self.node.object.interfaces.append(new_interface)
+
+        Gtk_Main.Gtk_Main().statusbar.change_message("Ready")
+
+    def open_filechooser(self, name, multiple_select=False):
+        """Open a file chooser for opening a file.
+
+        Parameters
+        ----------
+        name : string. the title name of the file chooser dialog
+        multiple_select : bool (optional, default=False). If true enable multiple selection
+
+        Return
+        ------
+        If mulitple_select is true return the list of selected file (or empty list if cancel)
+        If mulitple_select is false return the name of the selected file (or None if cancel)
+        """
+        filename = [] if multiple_select else None
+
+        dialog = gtk.FileChooserDialog(name,
+                                       None,
+                                       gtk.FILE_CHOOSER_ACTION_OPEN,
+                                       (gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL,
+                                        gtk.STOCK_OPEN, gtk.RESPONSE_OK))
+        dialog.set_select_multiple(multiple_select)
+        dialog.set_default_response(gtk.RESPONSE_OK)
+
+        response = dialog.run()
+        if response == gtk.RESPONSE_OK:
+            if multiple_select:
+                filename = dialog.get_filenames()
+            else:
+                filename = dialog.get_filename()
+        dialog.destroy()
+        return filename

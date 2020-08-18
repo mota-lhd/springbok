@@ -4,8 +4,22 @@
 import networkx as nx
 from Node import *
 from Edge import *
+from SpringBase.Operator import Operator
 from SpringBase.Ip import Ip
+from SpringBase.Rule import Rule
+from SpringBase.Port import Port
+from SpringBase.Protocol import Protocol
+from SpringBase.Action import Action
 from SpringBase.Interface import Interface
+
+
+
+
+######## Modification of the class by Maurice TCHAMGOUE N. on 22-06-2015
+###          * Adding _new_get_all_simple_paths and __new_all_simple_paths methods :
+###            these methods are intends to replace the old algorithm used by
+###            query path
+
 
 
 class NetworkGraph(object):
@@ -54,6 +68,7 @@ class NetworkGraph(object):
             self._add_interface(firewall, i)
             for sub_if in i.sub_interfaces:
                 self._add_interface(firewall, sub_if)
+        print len(self.graph.edges()), self.graph.edges()
 
     def _add_interface(self, firewall, interface):
         """Find or add the network interface if it doesn't exist and link the network with firewall
@@ -71,6 +86,15 @@ class NetworkGraph(object):
                 self.graph.add_edge(firewall, interface.network, object=Edge(interface, firewall))
             else:
                 self.graph.add_edge(firewall, res, object=Edge(interface, firewall))
+
+    def _add_route_info(self, firewall, data, interface, edge):
+        """Add informations about gateways and destinations network, and link them with the corresponding
+           firewall and network.
+        """
+        self.graph.add_node(data, object=Node(data))
+        self.graph.add_edge(firewall, data, object=Edge(data, firewall))
+        self.graph.add_edge(data, interface.network, object=Edge(data, interface))
+
 
     def bind_acl(self, acl, firewall, ip1, ip2):
         """Find or add nodes ip1 and ip2 if they don't exist and link them with the firewall and the acl as attribute
@@ -178,8 +202,343 @@ class NetworkGraph(object):
                 or not dest_node or not self.multidigraph.has_node(dest_node):
             raise
 
-        return nx.all_simple_paths(self.multidigraph, source_node, dest_node)
+        self._new_get_all_simple_paths(source_node, dest_node)
+        return self.res
 
+        # return nx.all_simple_paths(self.multidigraph, source_node, dest_node)
+
+    def get_all_simple_path_new(self, rule, current_path):
+        """
+        create a list of path in order to go from the source to the dest of the rule
+        :param rule: rule with the ip_source / port_source / port_dest / protocol / dest
+        :param current_path: an empty list to begin
+        :return: a list of list containing each element the packet go through
+        """
+        path_list = []
+        if len(current_path) == 0:
+            current_path.append([rule.ip_source[0], rule.ip_dest[0], rule.port_source, rule.port_dest, rule.protocol])
+            fw_ip_list = self.find_fw_from_ip(rule.ip_source[0])
+            for data in fw_ip_list:
+                new_rule = Rule(rule.identifier, rule.name, rule.protocol,
+                                [data[1]], rule.port_source, rule.ip_dest, rule.port_dest, Action(True))
+                tmp_path = list(current_path)
+                tmp_path.append([data[0]])
+                tmp_list = self.get_all_simple_path_new(new_rule, tmp_path)
+                path_list += tmp_list
+        elif len(current_path) == 1:
+            print "error when searching path"
+            return
+        else:
+            current_fw = current_path[len(current_path)-1][0]
+
+            # if prerouting insert here
+            # to do with iptables
+
+            datas = self.check_rule_fw(rule, current_fw)
+            if len(datas):
+                for data in datas:
+                    check_end = False
+                    tmp = list(current_path)
+                    if len(current_path[len(current_path)-1]) == 1:
+                        new_rule = Rule(0, "tmp_rule", data[4], [data[0]],
+                                        data[2], [data[1]], data[3], Action(True))
+                        tmp[len(tmp) - 1].append(new_rule)
+                    for fw_interface in current_fw.interfaces:
+                        if fw_interface.network is not None:
+                            tmp_ope = Operator("EQ", fw_interface.network)
+                            final_ip = self.ip_operator_merge(data[1], tmp_ope)
+                            if final_ip is not None:
+                                tmp_list = list(tmp)
+                                tmp_list.append([data[0], final_ip, data[2], data[3], data[4]])
+                                path_list.append(tmp_list)
+                                check_end = True
+                    if not check_end:
+                        routes_dests = self.find_routes(current_path, rule)
+                        for route_dest in routes_dests:
+                            check_dest = self.ip_operator_merge(route_dest[2], rule.ip_dest[0])
+                            if check_dest is not None:
+                                tmp_list.append([data[0], check_dest, data[2], data[3], data[4]])
+                                path_list.append(tmp_list)
+                            else:
+                                rule.ip_dest = [route_dest[1]]
+                                fw_list = self.find_fw_from_intefarce(route_dest[0].iface, current_path)
+                                for fw in fw_list:
+                                    tmp = list(current_path)
+                                    tmp.append([fw])
+                                    tmp_list = self.get_all_simple_path_new(rule, tmp)
+                                    path_list += tmp_list
+        return path_list
+
+    def find_fw_from_ip(self, ip_source_operator):
+        fw_ip_list = []
+        for fw in self.firewalls:
+            for interface in fw.interfaces:
+                if interface.network is not None:
+                    tmp_merge = self.ip_operator_merge(ip_source_operator, Operator("EQ", interface.network))
+                    if tmp_merge is not None:
+                        check_exist = True
+                        for data in fw_ip_list:
+                            if fw.hostname == data[0].hostname:
+                                if tmp_merge.operator == data[1].operator:
+                                    if tmp_merge.v1.ip == data[1].v1.ip and tmp_merge.v1.mask == data[1].v1.mask:
+                                        if tmp_merge.v2 is not None:
+                                            if tmp_merge.v2.ip == data[1].v2.ip and tmp_merge.v2.mask == data[1].v2.mask:
+                                                check_exist = False
+                                        else:
+                                            check_exist = False
+                        if check_exist:
+                            fw_ip_list.append([fw, tmp_merge])
+        return fw_ip_list
+
+    def find_fw_from_intefarce(self, interface, current_path):
+        """
+        return all the fw connect to an interface
+        """
+        fw_list = []
+        fw_hostname_list = []
+        for data in current_path:
+            if len(data) == 2:
+                fw_hostname_list.append(data[0].hostname)
+        for fw in self.firewalls:
+            if fw.hostname not in fw_hostname_list:
+                for fw_interface in fw.interfaces:
+                    if interface.network is not None and fw_interface.network is not None:
+                        if fw_interface.network.ip == interface.network.ip and \
+                                        fw_interface.network.mask == interface.network.mask:
+                            fw_list.append(fw)
+                            break
+        return fw_list
+
+    def find_routes(self, current_path, rule):
+        """
+        return a tuple (route, ip_operator) for each route which correspond to the rule receive in input
+        """
+        routes_dest_list = []
+        fw = current_path[len(current_path)-1][0]
+        for route in fw.route_list:
+            ip_dst = route.net_ip_dst.ip
+            mask_dst = route.net_mask.ip
+            ip_route = Operator("EQ", Ip(ip_dst, mask_dst))
+            for ip_dst in rule.ip_dest:
+                merge_ip = self.ip_operator_merge(ip_dst, ip_route)
+                if merge_ip is not None:
+                    routes_dest_list.append([route, merge_ip, Operator("EQ", route.gw_ip)])
+        return routes_dest_list
+
+    def check_rule_fw(self, rule, fw):
+        """
+        check if there is a firewall's rule which is partially or totally the same as
+        the rule receive in inbound
+        return a list of ip_operator corresponding to the ip_dest of all these rules
+        """
+        data = []
+        for acl in fw.acl:
+            for current_rule in acl.rules:
+                if current_rule.action.chain == rule.action.chain and current_rule.action.goto == rule.action.goto:
+                    port_source_list = self.regular_list_compare_operator(rule.port_source, current_rule.port_source)
+                    port_dest_list = self.regular_list_compare_operator(rule.port_dest, current_rule.port_dest)
+                    protocol_list = self.regular_list_compare_operator(rule.protocol, current_rule.protocol)
+                    if (port_source_list is not None) \
+                            and (port_dest_list is not None) \
+                            and (protocol_list is not None):
+
+                        for ip_ope in current_rule.ip_source:
+                            ip_source_merge = self.ip_operator_merge(ip_ope, rule.ip_source[0])
+                            if ip_source_merge:
+                                for operator in current_rule.ip_dest:
+                                    check_op = True
+                                    for tmp_data in data:
+                                        if tmp_data[1].v1.ip == operator.v1.ip and tmp_data[1].v1.mask == operator.v1.mask:
+                                            check_op = False
+                                    if check_op:
+                                        merge_ip = self.ip_operator_merge(operator, rule.ip_dest[0])
+                                        if merge_ip is not None:
+                                            data.append([ip_source_merge, merge_ip, port_source_list, port_dest_list, protocol_list])
+        return data
+
+    def ip_operator_merge(self, operator_1, operator_2):
+        """
+        take two ip_operator in input
+        return the intersection of the two operator
+        """
+        check = None
+        # 4294967295 value for 255.255.255.255
+        if operator_1.v1.mask != 4294967295:
+            tmp_val = 4294967295
+            ip_min_check = operator_1.v1.ip & operator_1.v1.mask
+            tmp_val = tmp_val ^ operator_1.v1.mask
+            ip_max_check = operator_1.v1.ip | tmp_val
+            operator_1 = Operator("RANGE", Ip(ip_min_check), Ip(ip_max_check))
+        if operator_2.v1.mask != 4294967295:
+            tmp_val = 4294967295
+            ip_min_check = operator_2.v1.ip & operator_2.v1.mask
+            tmp_val = tmp_val ^ operator_2.v1.mask
+            ip_max_check = operator_2.v1.ip | tmp_val
+            operator_2 = Operator("RANGE", Ip(ip_min_check), Ip(ip_max_check))
+        if operator_1.operator == "RANGE" and operator_2.operator == "RANGE":
+            if operator_1.v1.ip <= operator_2.v1.ip <= operator_1.v2.ip:
+                if operator_1.v1.ip <= operator_2.v2.ip <= operator_1.v2.ip:
+                    check = operator_2
+                elif operator_1.v2.ip < operator_2.v2.ip:
+                    check = Operator("RANGE", Ip(operator_2.v1.ip), Ip(operator_1.v2.ip))
+            elif operator_2.v1.ip < operator_1.v1.ip:
+                if operator_1.v2.ip <= operator_2.v2.ip:
+                    check = operator_1
+                elif operator_1.v1.ip <= operator_2.v2.ip < operator_1.v2.ip:
+                    check = Operator("RANGE", Ip(operator_1.v1.ip), Ip(operator_2.v2.ip))
+        elif operator_1.operator == "RANGE" and operator_2.operator != "RANGE":
+            if operator_1.v1.ip <= operator_2.v1.ip <= operator_1.v2.ip:
+                check = operator_2
+        elif operator_1.operator != "RANGE" and operator_2.operator == "RANGE":
+            if operator_2.v1.ip <= operator_1.v1.ip <= operator_2.v2.ip:
+                check = operator_1
+        elif operator_1.operator != "RANGE" and operator_2.operator != "RANGE":
+            if operator_1.v1.ip == operator_2.v1.ip:
+                check = operator_1
+        return check
+
+    def port_operator_merge(self, ope1, ope2):
+        """
+            take two port_operator in input
+            return the intersection of the two operator
+        """
+        data = None
+        if ope1.operator == "EQ" and ope2.operator == "EQ":
+            if ope1.v1.port == ope2.v1.port:
+                data = ope1
+        elif ope1.operator == "RANGE" and ope2.operator == "EQ":
+            if ope1.v1.port <= ope2.v1.port <= ope1.v2.port:
+                data = ope2
+        elif ope1.operator == "EQ" and ope2.operator == "RANGE":
+            if ope2.v1.port <= ope1.v1.port <= ope2.v2.port:
+                data = ope1
+        elif ope1.operator == "RANGE" and ope2.operator == "RANGE":
+            if ope1.v1.port <= ope2.v1.port <= ope1.v2.port:
+                if ope2.v2.port <= ope1.v2.port:
+                    data = ope2
+                else:
+                    data = ope2
+                    data.v2.port = ope1.v2.port
+            elif ope2.v1.port < ope1.v1.port:
+                if ope1.v1.port < ope2.v2.port < ope1.v2.port:
+                    data = ope2
+                    data.v1.port = ope1.v1.port
+                elif ope1.v2.port < ope2.v2.port:
+                    data = ope1
+        return data
+
+    def protocol_operator_merge(self, ope1, ope2):
+        """
+            take two protocol_operator in input
+            return the intersection of the two operator
+        """
+        data = None
+        if ope1.operator == "EQ" and ope2.operator == "EQ":
+            if ope1.v1.protocol == ope2.v1.protocol:
+                data = ope1
+        elif ope1.operator == "RANGE" and ope2.operator == "EQ":
+            if ope1.v1.protocol <= ope2.v1.protocol <= ope1.v2.protocol:
+                data = ope2
+        elif ope1.operator == "EQ" and ope2.operator == "RANGE":
+            if ope2.v1.protocol <= ope1.v1.protocol <= ope2.v2.protocol:
+                data = ope1
+        elif ope1.operator == "RANGE" and ope2.operator == "RANGE":
+            if ope1.v1.protocol <= ope2.v1.protocol <= ope1.v2.protocol:
+                if ope2.v2.protocol <= ope1.v2.protocol:
+                    data = ope2
+                else:
+                    data = ope2
+                    data.v2.protocol = ope1.v2.protocol
+            elif ope2.v1.protocol < ope1.v1.protocol:
+                if ope1.v1.protocol < ope2.v2.protocol < ope1.v2.protocol:
+                    data = ope2
+                    data.v1.protocol = ope1.v1.protocol
+                elif ope1.v2.protocol < ope2.v2.protocol:
+                    data = ope1
+        return data
+
+    def regular_list_compare_operator(self, operators1, operators2):
+        """
+        Compare two operator list
+        return all the element in common in the both list
+        """
+        return_list = None
+        check_list_seria = []
+        if not len(operators1) and len(operators2):
+            if len(operators2):
+                return_list = operators2
+        elif len(operators1) and not len(operators2):
+            if len(operators1):
+                return_list = operators1
+        elif not len(operators1) and not len(operators2):
+            return_list = []
+        elif len(operators1) and len(operators2):
+            if isinstance(operators1[0].v1, Port):
+                for ope1 in operators1:
+                    for ope2 in operators2:
+                        compare_ope = self.port_operator_merge(ope1, ope2)
+                        if compare_ope is not None:
+                            compare_seria = compare_ope.seria_compare()
+                            if compare_seria not in check_list_seria:
+                                if return_list is None:
+                                    return_list = []
+                                check_list_seria.append(compare_seria)
+                                return_list.append(compare_ope)
+            elif isinstance(operators1[0].v1, Protocol):
+                for ope1 in operators1:
+                    for ope2 in operators2:
+                        compare_ope = self.protocol_operator_merge(ope1, ope2)
+                        if compare_ope is not None:
+                            compare_seria = compare_ope.seria_compare()
+                            if compare_seria not in check_list_seria:
+                                if return_list is None:
+                                    return_list = []
+                                check_list_seria.append(compare_seria)
+                                return_list.append(compare_ope)
+        return return_list
+
+    def _new_get_all_simple_paths(self, source_node, dest_node):
+        """Retrieve all simple paths between two node of the graph.
+        """
+        self.res, self.marks, source_node, dest_node = [], [], source_node, dest_node
+        self.marks.append(source_node)
+        self.__new_all_simple_paths(source_node, dest_node)
+
+    def __new_all_simple_paths(self, source_node, dest_node):
+        """Recursive implementation of DSF search algorithm to find all simple paths
+           between two nodes
+        """
+        if len(self.res) < 100:
+            son_list = self.multidigraph.neighbors(source_node)
+            for son in son_list:
+                if son == dest_node:
+                    tmp_list = []
+                    for node in self.marks:
+                        tmp_list.append(node)
+                    tmp_list.append(dest_node)
+                    self.res.append(list(tmp_list))
+                else:
+                    check = True
+                    if son is not None:
+                        for mark in self.marks:
+                            if son.ip == mark.ip and son.mask == mark.mask:
+                                check = False
+                                break
+                        if check:
+                            self.marks.append(son)
+                            self.__new_all_simple_paths(son, dest_node)
+                            self.marks.pop()
+    """
+    def algo_de_recherche(source, dest, list_of_ip)
+        list_ip_reachable = get all ip reachable corresponding to the message
+        for ip in list_ip_reachable
+            if ip == dest:
+                list_of_ip.append(dest)
+            if ip is in list_of_ip:
+                continue
+            else
+            list_of_ip = algo_ip_reachable(ip,dest, list_of_ip.append(ip))
+    """
     def get_acl_list(self, src=None, dst=None, firewall=None):
         """Get all acl filtered by optional parameters
 
